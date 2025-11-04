@@ -16,10 +16,7 @@ from zipfile import ZipFile
 
 from colorama import Fore
 from requests import get
-from selenium import webdriver
-from selenium.webdriver.chrome.webdriver import WebDriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.select import Select
+from playwright.sync_api import sync_playwright, Page, Browser
 from tqdm import tqdm
 from twocaptcha import TwoCaptcha
 
@@ -108,11 +105,10 @@ class eGen:
         self.Utils = Utils()  # Utils Module
         self.config: Any = load(open('config.json'))  # Config File
         self.checkConfig()  # Check Config File
-        self.options = webdriver.ChromeOptions()  # Driver Options
         self.Timer = Timer()  # Timer
 
-        self.driver = None
-        self.capabilities = None
+        self.playwright = None
+        self.browser = None
         self.first_name = None  # Generate First Name
         self.last_name = None  # Generate Last Name
         self.password = None  # Generate Password
@@ -125,17 +121,16 @@ class eGen:
 
         # Other
         self.proxies = [i.strip() for i in open(self.config['Common']['ProxyFile']).readlines()]  # Get Proxies
+
+        # Browser launch arguments (converted from Chrome args)
+        self.browser_args = []
         for arg in tqdm(self.config["DriverArguments"], desc='Loading Arguments',
-                        bar_format='{desc} | {l_bar}{bar:15} | {percentage:3.0f}%'):  # Get Driver Arguments
-            self.options.add_argument(arg)  # Add Argument to option
+                        bar_format='{desc} | {l_bar}{bar:15} | {percentage:3.0f}%'):
+            if arg not in ['--disable-blink-features=AutomationControlled']:  # Playwright handles this differently
+                self.browser_args.append(arg)
             sleep(0.2)
 
-        # More Options
-        self.options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        self.options.add_experimental_option('excludeSwitches', ['enable-logging'])
-        self.options.add_experimental_option('useAutomationExtension', False)
-
-    def solver(self, site_url, browser):
+    def solver(self, site_url, page):
         # Solve Captcha Function
         global solvedCaptcha
         # TwoCaptcha
@@ -155,7 +150,7 @@ class eGen:
             result = job.get_solution_response()
             if result.find("ERROR") != -1:
                 self.print(result)
-                browser.quit()
+                page.close()
             else:
                 solvedCaptcha += 1
                 return result
@@ -169,17 +164,14 @@ class eGen:
             return True
         return False
 
-    def fElement(self, driver: WebDriver, by: By = By.ID, value=None, delay: float = 0.3):
-        # Custom find Element Function
-        count = 0
-        while count <= 100:
-            with suppress(Exception):
-                return driver.find_element(by, value)
-            sleep(delay)
-            count += 1
-        self.print(f'tried 100 time to find element...')
-        driver.quit()
-        return
+    def fElement(self, page: Page, selector: str, timeout: float = 30000):
+        # Custom find Element Function using Playwright
+        try:
+            return page.locator(selector)
+        except Exception as e:
+            self.print(f'Failed to find element: {selector}')
+            page.close()
+            return None
 
     def get_balance(self):
         # Check provider Balance Function
@@ -230,89 +222,201 @@ class eGen:
                                      '&8': Fore.LIGHTBLACK_EX,
                                      '&0': Fore.BLACK}), end=end)
 
-    def CreateEmail(self, driver: WebDriver):
+    def CreateEmail(self, page: Page):
         # Create Email Function
         try:
             global eGenerated, solvedCaptcha
             self.update()
             self.Timer.start(time()) if self.config["Common"]['Timer'] else ''
-            driver.get("https://outlook.live.com/owa/?nlp=1&signup=1")
-            assert 'Create' in driver.title
+
+            page.goto("https://outlook.live.com/owa/?nlp=1&signup=1")
+            page.wait_for_load_state("networkidle")
+            assert 'Create' in page.title()
+
             if self.config['EmailInfo']['Domain'] == "@hotmail.com":
-                domain = self.fElement(driver, By.ID, 'LiveDomainBoxList')
+                domain = page.locator('#LiveDomainBoxList')
+                domain.select_option('hotmail.com')
                 sleep(0.1)
-                domainObject = Select(domain)
-                domainObject.select_by_value('hotmail.com')
-            emailInput = self.fElement(driver, By.ID, 'MemberName')
-            emailInput.send_keys(self.email)
+
+            emailInput = page.locator('#MemberName')
+            emailInput.fill(self.email)
             self.print(f"email: {self.email}{self.config['EmailInfo']['Domain']}")
-            self.fElement(driver, By.ID, 'iSignupAction').click()
+            page.locator('#iSignupAction').click()
+
             with suppress(Exception):
-                self.print(driver.find_element(By.ID, 'MemberNameError').text)
-                self.print("email is already taken")
-                driver.quit()
-                return
-            passwordinput = self.fElement(driver, By.ID, 'PasswordInput')
-            passwordinput.send_keys(self.password)
+                error_text = page.locator('#MemberNameError').text_content(timeout=2000)
+                if error_text:
+                    self.print(error_text)
+                    self.print("email is already taken")
+                    page.close()
+                    return
+
+            passwordinput = page.locator('#PasswordInput')
+            passwordinput.fill(self.password)
             self.print("Password: %s" % self.password)
-            self.fElement(driver, By.ID, 'iSignupAction').click()
-            first = self.fElement(driver, By.ID, "FirstName")
-            first.send_keys(self.first_name)
+            page.locator('#iSignupAction').click()
+
+            first = page.locator("#FirstName")
+            first.fill(self.first_name)
             sleep(.3)
-            last = self.fElement(driver, By.ID, "LastName")
-            last.send_keys(self.last_name)
-            self.fElement(driver, By.ID, 'iSignupAction').click()
-            dropdown = self.fElement(driver, By.ID, "Country")
-            dropdown.find_element(By.XPATH, "//option[. = 'Turkey']").click()
-            birthMonth = self.fElement(driver, By.ID, "BirthMonth")
-            objectMonth = Select(birthMonth)
-            objectMonth.select_by_value(str(randint(1, 12)))
-            birthMonth = self.fElement(driver, By.ID, "BirthDay")
-            objectMonth = Select(birthMonth)
-            objectMonth.select_by_value(str(randint(1, 28)))
-            birthYear = self.fElement(driver, By.ID, "BirthYear")
-            birthYear.send_keys(
-                str(randint(self.config['EmailInfo']['minBirthDate'], self.config['EmailInfo']['maxBirthDate'])))
-            self.fElement(driver, By.ID, 'iSignupAction').click()
-            driver.switch_to.frame(self.fElement(driver, By.ID, 'enforcementFrame'))
-            token = self.solver(driver.current_url, self.driver)
+            last = page.locator("#LastName")
+            last.fill(self.last_name)
+            page.locator('#iSignupAction').click()
+
+            dropdown = page.locator("#Country")
+            dropdown.select_option(label='Turkey')
+
+            birthMonth = page.locator("#BirthMonth")
+            birthMonth.select_option(str(randint(1, 12)))
+
+            birthDay = page.locator("#BirthDay")
+            birthDay.select_option(str(randint(1, 28)))
+
+            birthYear = page.locator("#BirthYear")
+            birthYear.fill(str(randint(self.config['EmailInfo']['minBirthDate'], self.config['EmailInfo']['maxBirthDate'])))
+
+            page.locator('#iSignupAction').click()
+
+            # Handle iframe for captcha
+            frame = page.frame_locator('#enforcementFrame')
+            token = self.solver(page.url, page)
             sleep(0.5)
-            driver.execute_script(
-                'parent.postMessage(JSON.stringify({eventId:"challenge-complete",payload:{sessionToken:"' + token + '"}}),"*")')
+            page.evaluate(
+                f'parent.postMessage(JSON.stringify({{eventId:"challenge-complete",payload:{{sessionToken:"{token}"}}}}),"*")')
             self.print("&aCaptcha Solved")
             self.update()
-            self.fElement(driver, By.ID, 'idBtn_Back').click()
+
+            page.locator('#idBtn_Back').click()
             self.print(f'Email Created in {str(self.Timer.timer(time())).split(".")[0]}s') if \
                 self.config["Common"]['Timer'] else self.print('Email Created')
             eGenerated += 1
             self.Utils.logger(self.email + self.config['EmailInfo']['Domain'], self.password)
             self.update()
-            driver.quit()
+            page.close()
         except Exception as e:
             if e == KeyboardInterrupt:
-                driver.quit()
+                page.close()
                 exit(0)
             self.print("&4Something is wrong | %s" % str(e).split("\n")[0].strip())
         finally:
-            driver.quit()
+            page.close()
 
-    def run(self):
-        # Run Script Function
+    def get_valid_proxy(self):
+        """Get a valid proxy from the proxy list"""
+        while self.proxies:
+            proxy = choice(self.proxies)
+            if self.check_proxy(proxy):
+                self.print(f"&aUsing proxy: &f{proxy}")
+                return proxy
+            else:
+                self.print("&c%s &f| &4Invalid Proxy&f" % proxy)
+                self.proxies.remove(proxy)
+        return None
+
+    def create_single_account(self):
+        """Create a single email account (one complete registration flow)"""
+        # Generate account information
+        self.generate_info()
+
+        # Get a valid proxy
+        proxy = self.get_valid_proxy()
+        if not proxy:
+            self.print("&4No valid proxy available!")
+            return False
+
+        # Create the email account using Playwright
+        try:
+            with sync_playwright() as p:
+                # Parse proxy format: ip:port or ip:port:username:password
+                proxy_parts = proxy.split(':')
+                proxy_config = {
+                    "server": f"http://{proxy_parts[0]}:{proxy_parts[1]}"
+                }
+                if len(proxy_parts) == 4:
+                    proxy_config["username"] = proxy_parts[2]
+                    proxy_config["password"] = proxy_parts[3]
+
+                # Launch browser with proxy
+                browser = p.chromium.launch(
+                    headless='--headless' in self.browser_args,
+                    args=self.browser_args,
+                    proxy=proxy_config
+                )
+
+                # Create context and page
+                context = browser.new_context()
+                page = context.new_page()
+
+                # Create the email
+                self.CreateEmail(page=page)
+
+                # Cleanup
+                context.close()
+                browser.close()
+            return True
+        except Exception as e:
+            self.print(f"&4Failed to create account: {str(e)}")
+            return False
+
+    def run(self, count=None):
+        """
+        Run the email generation script
+
+        Args:
+            count (int, optional): Number of accounts to create.
+                                   If None, runs indefinitely until proxies run out.
+        """
         self.print('&bCoded with &c<3&b by MatrixTeam')
+
+        if count is None:
+            self.print('&eRunning in unlimited mode (Ctrl+C to stop)')
+        else:
+            self.print(f'&eWill create &a{count}&e account(s)')
+
+        created = 0
+        attempts = 0
+
         with suppress(IndexError):
             while True:
-                    self.generate_info()
-                    proxy = choice(self.proxies)  # Select Proxy
-                    if not self.check_proxy(proxy):
-                        self.print("&c%s &f| &4Invalid Proxy&f" % proxy)
-                        self.proxies.remove(proxy)
-                        continue
-                    self.print(proxy)
-                    self.options.add_argument("--proxy-server=http://%s" % proxy)
-                    self.CreateEmail(driver=webdriver.Chrome(options=self.options, desired_capabilities=self.capabilities))
-        self.print("&4No Proxy Available, Exiting!")
+                # Check if we've reached the target count
+                if count is not None and created >= count:
+                    self.print(f'&aCompleted! Created {created} account(s)')
+                    break
+
+                # Check if we have proxies available
+                if not self.proxies:
+                    self.print("&4No Proxy Available, Exiting!")
+                    break
+
+                attempts += 1
+                self.print(f'\n&b--- Attempt {attempts} (Created: {created}/{count if count else "unlimited"}) ---')
+
+                # Try to create an account
+                if self.create_single_account():
+                    created += 1
+
+        self.print(f'\n&b=== Summary ===')
+        self.print(f'&aSuccessfully created: {created}')
+        self.print(f'&eTotal attempts: {attempts}')
 
 
 
 if __name__ == '__main__':
-    eGen().run()
+    from sys import argv
+
+    # Check if user provided a count argument
+    if len(argv) > 1:
+        try:
+            count = int(argv[1])
+            if count <= 0:
+                print("Error: Count must be a positive number")
+                exit(1)
+            eGen().run(count=count)
+        except ValueError:
+            print(f"Error: Invalid count '{argv[1]}'. Please provide a positive integer.")
+            print("Usage: python main.py [count]")
+            print("  count: Number of accounts to create (optional, default: unlimited)")
+            exit(1)
+    else:
+        # No argument provided, run unlimited mode
+        eGen().run()
